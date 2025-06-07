@@ -7,6 +7,6 @@ pandas
 soundfile
 pydub
 transformers>=4.40.0
-
+audio-recorder-streamlit
 torch
 torchaudio
