@@ -936,12 +936,7 @@ def main():
             """, unsafe_allow_html=True)
             
             
-            except Exception as e:
-                display_error_message(str(e), "transcription")
-            finally:
-                # Clean up uploaded file
-                if temp_file_path:
-                    safe_file_cleanup(temp_file_path)
+            
     
     # Recent transcriptions
     if st.session_state.transcription_history:
