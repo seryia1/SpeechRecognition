@@ -974,16 +974,7 @@ def main():
                     key=f"download_{i}"
                 )
     
-    # Footer
-    st.divider()
-    st.markdown("""
-    <div style="text-align: center; color: #666; padding: 2rem;">
-        <h4>💡 Tips for Better Recognition</h4>
-        <p>🎧 Use clear audio recordings | 🔇 Avoid background noise | 🗣️ Ensure clear speech</p>
-        <p>🌐 Different APIs work better for different languages | 📱 Works with mobile uploads</p>
-        <p>🎵 High-quality audio files for better transcription accuracy</p>
-    </div>
-    """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
