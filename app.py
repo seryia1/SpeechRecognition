@@ -12,14 +12,10 @@ from pathlib import Path
 import soundfile as sf
 from pydub import AudioSegment
 import gc
-import io
-import wave
-import threading
-import time
 
 # Configure page
 st.set_page_config(
-    page_title="🎙️ Enhanced Speech Recognition App",
+    page_title="🎙️ Speech Recognition App",
     page_icon="🎙️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -67,33 +63,6 @@ st.markdown("""
         margin: 0.2rem 0;
         border-left: 3px solid #2196f3;
     }
-    .recording-indicator {
-        background: #ffebee;
-        padding: 1rem;
-        border-radius: 10px;
-        border: 2px solid #f44336;
-        text-align: center;
-        animation: pulse 2s infinite;
-    }
-    .paused-indicator {
-        background: #fff3e0;
-        padding: 1rem;
-        border-radius: 10px;
-        border: 2px solid #ff9800;
-        text-align: center;
-    }
-    .recorded-audio-box {
-        background: #e8f5e8;
-        padding: 1rem;
-        border-radius: 10px;
-        border: 2px solid #4caf50;
-        margin: 1rem 0;
-    }
-    @keyframes pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.5; }
-        100% { opacity: 1; }
-    }
     .error-message {
         background: #ffebee;
         color: #c62828;
@@ -118,35 +87,13 @@ st.markdown("""
         border-left: 4px solid #2196f3;
         margin: 1rem 0;
     }
-    .warning-message {
-        background: #fff3e0;
-        color: #ef6c00;
-        padding: 1rem;
-        border-radius: 5px;
-        border-left: 4px solid #ff9800;
-        margin: 1rem 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize session state
 def initialize_session_state():
-    if 'recording' not in st.session_state:
-        st.session_state.recording = False
-    if 'paused' not in st.session_state:
-        st.session_state.paused = False
-    if 'recorded_audio_bytes' not in st.session_state:
-        st.session_state.recorded_audio_bytes = None
-    if 'recorded_audio_filename' not in st.session_state:
-        st.session_state.recorded_audio_filename = None
-    if 'recorded_audio_file' not in st.session_state:
-        st.session_state.recorded_audio_file = None
-    if 'recorded_audio_data' not in st.session_state:
-        st.session_state.recorded_audio_data = None
     if 'transcription_history' not in st.session_state:
         st.session_state.transcription_history = []
-    if 'microphone_available' not in st.session_state:
-        st.session_state.microphone_available = None
 
 # Language options for speech recognition
 LANGUAGE_OPTIONS = {
@@ -188,41 +135,6 @@ def load_asr_model(model_name):
         st.error(f"Error loading model: {str(e)}")
         return None
 
-def check_microphone_availability():
-    """Check if microphone is available and working"""
-    try:
-        import pyaudio
-        p = pyaudio.PyAudio()
-        
-        # Check if there are any input devices
-        device_count = p.get_device_count()
-        if device_count == 0:
-            p.terminate()
-            return False, "No audio devices found"
-        
-        # Try to find a working input device
-        input_device_found = False
-        for i in range(device_count):
-            try:
-                device_info = p.get_device_info_by_index(i)
-                if device_info['maxInputChannels'] > 0:
-                    input_device_found = True
-                    break
-            except:
-                continue
-        
-        p.terminate()
-        
-        if not input_device_found:
-            return False, "No input devices (microphones) found"
-        
-        return True, "Microphone available"
-        
-    except ImportError:
-        return False, "PyAudio not installed - recording not available"
-    except Exception as e:
-        return False, f"Microphone check failed: {str(e)}"
-
 class AudioProcessor:
     """Handle audio file conversion and preprocessing"""
     
@@ -259,6 +171,7 @@ class AudioProcessor:
 
 def safe_file_cleanup(file_path, max_retries=3, delay=0.1):
     """Safely delete a file with retries"""
+    import time
     for attempt in range(max_retries):
         try:
             if os.path.exists(file_path):
@@ -274,239 +187,6 @@ def safe_file_cleanup(file_path, max_retries=3, delay=0.1):
                 st.warning(f"Could not delete temporary file: {str(e)}")
                 return False
     return True
-
-class AudioRecorder:
-    """Handle audio recording with better error handling and validation"""
-    
-    def __init__(self):
-        self.sample_rate = 44100  # Higher quality
-        self.chunk_size = 1024
-        self.format = None
-        self.channels = 1
-        self.pyaudio_available = False
-        
-        # Try to import and initialize PyAudio
-        try:
-            import pyaudio
-            self.pyaudio = pyaudio
-            self.format = pyaudio.paInt16
-            self.pyaudio_available = True
-        except ImportError:
-            self.pyaudio_available = False
-    
-    def is_available(self):
-        """Check if recording is available"""
-        return self.pyaudio_available
-    
-    def get_microphone_info(self):
-        """Get information about available microphones"""
-        if not self.pyaudio_available:
-            return []
-        
-        try:
-            p = self.pyaudio.PyAudio()
-            devices = []
-            
-            for i in range(p.get_device_count()):
-                try:
-                    device_info = p.get_device_info_by_index(i)
-                    if device_info['maxInputChannels'] > 0:
-                        devices.append({
-                            'index': i,
-                            'name': device_info['name'],
-                            'channels': device_info['maxInputChannels'],
-                            'sample_rate': device_info['defaultSampleRate']
-                        })
-                except:
-                    continue
-            
-            p.terminate()
-            return devices
-        except Exception as e:
-            return []
-    
-    def test_microphone(self, duration=2):
-        """Test microphone by recording a short sample"""
-        if not self.pyaudio_available:
-            return False, "PyAudio not available"
-        
-        try:
-            p = self.pyaudio.PyAudio()
-            
-            # Try to open a stream
-            stream = p.open(
-                format=self.format,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                frames_per_buffer=self.chunk_size
-            )
-            
-            # Record a short test
-            frames = []
-            for _ in range(int(self.sample_rate / self.chunk_size * duration)):
-                try:
-                    data = stream.read(self.chunk_size, exception_on_overflow=False)
-                    frames.append(data)
-                except Exception as e:
-                    stream.stop_stream()
-                    stream.close()
-                    p.terminate()
-                    return False, f"Recording failed: {str(e)}"
-            
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            
-            # Check if we got audio data
-            if frames:
-                audio_data = np.frombuffer(b''.join(frames), dtype=np.int16)
-                max_amplitude = np.max(np.abs(audio_data))
-                
-                if max_amplitude < 50:  # Very quiet
-                    return False, f"Microphone appears to be muted or very quiet (max amplitude: {max_amplitude})"
-                elif max_amplitude < 500:  # Quiet but working
-                    return True, f"Microphone working but quiet (max amplitude: {max_amplitude}) - try speaking louder"
-                else:
-                    return True, f"Microphone working well (max amplitude: {max_amplitude})"
-            else:
-                return False, "No audio data recorded"
-                
-        except Exception as e:
-            return False, f"Microphone test failed: {str(e)}"
-    
-    def record_audio(self, duration):
-        """Record audio and return raw audio data with better validation"""
-        if not self.pyaudio_available:
-            raise Exception("PyAudio not available - cannot record audio")
-        
-        try:
-            p = self.pyaudio.PyAudio()
-            
-            # Check if microphone is available
-            if p.get_device_count() == 0:
-                raise Exception("No audio devices found")
-            
-            # Get default input device info
-            try:
-                device_info = p.get_default_input_device_info()
-                st.info(f"🎤 Using microphone: {device_info['name']}")
-            except:
-                st.info("🎤 Using default microphone")
-            
-            stream = p.open(
-                format=self.format,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                frames_per_buffer=self.chunk_size
-            )
-            
-            frames = []
-            total_frames = int(self.sample_rate / self.chunk_size * duration)
-            
-            # Add progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for i in range(total_frames):
-                if not st.session_state.recording:
-                    break
-                
-                # Handle pause/resume
-                while st.session_state.paused and st.session_state.recording:
-                    time.sleep(0.1)
-                
-                if not st.session_state.recording:
-                    break
-                
-                try:
-                    data = stream.read(self.chunk_size, exception_on_overflow=False)
-                    frames.append(data)
-                    
-                    # Update progress
-                    progress = (i + 1) / total_frames
-                    progress_bar.progress(progress)
-                    status_text.text(f"Recording... {progress:.0%} ({i+1}/{total_frames})")
-                    
-                except Exception as e:
-                    st.warning(f"Audio read error: {str(e)}")
-                    break
-            
-            progress_bar.empty()
-            status_text.empty()
-            
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            
-            if frames:
-                # Convert to numpy array
-                audio_data = np.frombuffer(b''.join(frames), dtype=np.int16)
-                
-                # Detailed audio analysis
-                max_amplitude = np.max(np.abs(audio_data))
-                rms = np.sqrt(np.mean(audio_data.astype(np.float64) ** 2))
-                
-                st.info(f"📊 Audio Analysis: Max amplitude: {max_amplitude}, RMS: {rms:.1f}")
-                
-                # Check if recording is not silent with better thresholds
-                if max_amplitude < 50:
-                    raise Exception(f"Recording appears to be silent (max amplitude: {max_amplitude}) - check microphone volume and permissions")
-                elif max_amplitude < 200:
-                    st.warning(f"⚠️ Recording is very quiet (max amplitude: {max_amplitude}) - transcription may be poor")
-                
-                return audio_data
-            else:
-                return None
-                
-        except Exception as e:
-            raise Exception(f"Recording error: {str(e)}")
-    
-    def save_as_mp3_bytes(self, audio_data):
-        """Save audio data as MP3 in memory and return bytes"""
-        try:
-            # Convert numpy array to AudioSegment
-            audio_segment = AudioSegment(
-                audio_data.tobytes(),
-                frame_rate=self.sample_rate,
-                sample_width=audio_data.dtype.itemsize,
-                channels=self.channels
-            )
-            
-            # Normalize audio (make it louder) but be careful not to clip
-            normalized = audio_segment.normalize()
-            
-            # Apply some gain if it's still quiet
-            if normalized.max_possible_amplitude < 10000:
-                normalized = normalized + 6  # Add 6dB gain
-            
-            # Export as MP3 to bytes buffer
-            mp3_buffer = io.BytesIO()
-            normalized.export(mp3_buffer, format="mp3", bitrate="128k")
-            mp3_buffer.seek(0)
-            
-            return mp3_buffer.getvalue()
-            
-        except Exception as e:
-            raise Exception(f"Error creating MP3: {str(e)}")
-    
-    def save_as_wav_bytes(self, audio_data):
-        """Save audio data as WAV in memory and return bytes"""
-        try:
-            wav_buffer = io.BytesIO()
-            
-            with wave.open(wav_buffer, 'wb') as wav_file:
-                wav_file.setnchannels(self.channels)
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(self.sample_rate)
-                wav_file.writeframes(audio_data.tobytes())
-            
-            wav_buffer.seek(0)
-            return wav_buffer.getvalue()
-            
-        except Exception as e:
-            raise Exception(f"Error creating WAV: {str(e)}")
 
 class SpeechRecognitionManager:
     def __init__(self):
@@ -721,36 +401,19 @@ def display_info_message(message):
     </div>
     """, unsafe_allow_html=True)
 
-def display_warning_message(message):
-    """Display formatted warning messages"""
-    st.markdown(f"""
-    <div class="warning-message">
-        <strong>⚠️ Warning:</strong><br>
-        {message}
-    </div>
-    """, unsafe_allow_html=True)
-
 def main():
     initialize_session_state()
     
     # Header
     st.markdown("""
     <div class="main-header">
-        <h1>🎙️ Enhanced Speech Recognition App</h1>
-        <p>Upload Files OR Record Live Audio | Multi-API Support | Professional Quality</p>
+        <h1>🎙️ Speech Recognition App</h1>
+        <p>Upload Audio Files for Transcription | No Recording Dependencies</p>
     </div>
     """, unsafe_allow_html=True)
     
     # Initialize components
     sr_manager = SpeechRecognitionManager()
-    audio_recorder = AudioRecorder()
-    
-    # Check microphone availability once
-    if st.session_state.microphone_available is None:
-        mic_available, mic_message = check_microphone_availability()
-        st.session_state.microphone_available = mic_available
-        if not mic_available:
-            display_warning_message(f"Live recording not available: {mic_message}")
     
     # Sidebar configuration
     with st.sidebar:
@@ -820,35 +483,7 @@ def main():
                 else:
                     st.markdown('<div class="api-status api-error">❌ API Not Available</div>', unsafe_allow_html=True)
         
-        # Microphone testing section
-        if st.session_state.microphone_available and audio_recorder.is_available():
-            st.subheader("🎤 Microphone Test")
-            
-            # Show available microphones
-            mics = audio_recorder.get_microphone_info()
-            if mics:
-                st.write("📱 Available microphones:")
-                for mic in mics[:3]:  # Show first 3
-                    st.write(f"• {mic['name']}")
-            
-            if st.button("🔍 Test Microphone"):
-                with st.spinner("Testing microphone for 2 seconds..."):
-                    test_success, test_message = audio_recorder.test_microphone(duration=2)
-                    if test_success:
-                        st.success(f"✅ {test_message}")
-                    else:
-                        st.error(f"❌ {test_message}")
-        
         st.divider()
-        
-        # Recording Settings (only show if microphone available)
-        if st.session_state.microphone_available:
-            st.subheader("🎤 Recording Settings")
-            recording_duration = st.slider("Recording Duration (seconds)", 5, 60, 15)
-            
-            # Audio quality settings
-            st.subheader("🎵 Audio Quality")
-            st.info("📀 **Format:** MP3 (128kbps)\n📊 **Sample Rate:** 44.1kHz\n🎧 **Channels:** Mono")
         
         # File Export Settings
         st.subheader("💾 Export Settings")
@@ -877,341 +512,118 @@ def main():
             
             if st.button("🗑️ Clear History"):
                 st.session_state.transcription_history = []
-                # Clear recorded audio
-                st.session_state.recorded_audio_bytes = None
-                st.session_state.recorded_audio_filename = None
-                st.session_state.recorded_audio_file = None
-                st.session_state.recorded_audio_data = None
                 st.rerun()
         else:
             st.write("No transcriptions yet")
         
         # Audio Format Info
         st.subheader("📋 Supported Formats")
-        st.info("📁 **Upload:** MP3, WAV, FLAC, M4A, OGG, AIFF\n🎙️ **Record:** MP3 (High Quality)\n🔄 **Auto-converts** to compatible format")
+        st.info("📁 **Upload:** MP3, WAV, FLAC, M4A, OGG, AIFF\n🔄 **Auto-converts** to compatible format")
     
     # Main content area
-    col1, col2 = st.columns(2)
+    st.markdown("""
+    <div class="feature-box">
+        <h3>📁 Audio File Transcription</h3>
+        <p>Upload audio files in any format - automatic conversion included</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    with col1:
-        st.markdown("""
-        <div class="feature-box">
-            <h3>📁 File Upload Transcription</h3>
-            <p>Upload audio files - automatic format conversion included</p>
-        </div>
-        """, unsafe_allow_html=True)
+    # File uploader - this replaces the PyAudio recording functionality
+    uploaded_audio = st.file_uploader(
+        "Upload an audio file", 
+        type=["wav", "mp3", "m4a", "flac", "ogg", "aiff", "aif"],
+        help="All formats supported - automatic conversion to compatible format"
+    )
+    
+    if uploaded_audio is not None:
+        st.audio(uploaded_audio)
         
-        uploaded_audio = st.file_uploader(
-            "Upload an audio file", 
-            type=["wav", "mp3", "m4a", "flac", "ogg", "aiff", "aif"],
-            help="All formats supported - automatic conversion to compatible format"
-        )
+        # Show file info
+        file_size = len(uploaded_audio.read()) / (1024 * 1024)  # MB
+        uploaded_audio.seek(0)  # Reset file pointer
+        st.write(f"📊 File: {uploaded_audio.name} ({file_size:.2f} MB)")
         
-        if uploaded_audio is not None:
-            st.audio(uploaded_audio)
-            
-            # Show file info
-            file_size = len(uploaded_audio.read()) / (1024 * 1024)  # MB
-            uploaded_audio.seek(0)  # Reset file pointer
-            st.write(f"📊 File: {uploaded_audio.name} ({file_size:.2f} MB)")
-            
-            if st.button("🚀 Transcribe Uploaded File", type="primary"):
-                temp_file_path = None
-                try:
-                    with st.spinner(f"Processing and transcribing with {selected_api_name}..."):
-                        # Save uploaded file temporarily
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_audio.name).suffix) as tmp_file:
-                            tmp_file.write(uploaded_audio.read())
-                            temp_file_path = tmp_file.name
+        if st.button("🚀 Transcribe Audio File", type="primary"):
+            temp_file_path = None
+            try:
+                with st.spinner(f"Processing and transcribing with {selected_api_name}..."):
+                    # Save uploaded file temporarily
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_audio.name).suffix) as tmp_file:
+                        tmp_file.write(uploaded_audio.read())
+                        temp_file_path = tmp_file.name
+                    
+                    # Transcribe
+                    result = sr_manager.transcribe_audio_file(
+                        temp_file_path, api_name, language_code, asr_pipeline
+                    )
+                    
+                    # Display results
+                    display_success_message(f"File transcription completed using {result.get('method', api_name)}!")
+                    
+                    st.subheader("📝 Transcription Result:")
+                    transcript_text = result["text"]
+                    
+                    if not transcript_text or transcript_text.strip() == "":
+                        st.warning("⚠️ No speech detected in the audio file")
+                    else:
+                        st.text_area("Transcript", transcript_text, height=150)
                         
-                        # Transcribe
-                        result = sr_manager.transcribe_audio_file(
-                            temp_file_path, api_name, language_code, asr_pipeline
+                        # Show confidence if available
+                        if "confidence" in result and result["confidence"] != "N/A":
+                            st.write(f"🎯 Confidence: {result['confidence']:.2%}")
+                        
+                        # Save to history
+                        save_transcription_history(
+                            transcript_text,
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            f"File Upload ({selected_api_name})",
+                            selected_language,
+                            result.get("confidence", "N/A"),
+                            uploaded_audio.name
                         )
                         
-                        # Display results
-                        display_success_message(f"File transcription completed using {result.get('method', api_name)}!")
+                        # Download options
+                        col1, col2 = st.columns(2)
                         
-                        st.subheader("📝 Transcription Result:")
-                        transcript_text = result["text"]
-                        
-                        if not transcript_text or transcript_text.strip() == "":
-                            st.warning("⚠️ No speech detected in the audio file")
-                        else:
-                            st.text_area("Transcript", transcript_text, height=150)
-                            
-                            # Show confidence if available
-                            if "confidence" in result and result["confidence"] != "N/A":
-                                st.write(f"🎯 Confidence: {result['confidence']:.2%}")
-                            
-                            # Save to history
-                            save_transcription_history(
-                                transcript_text,
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                f"File Upload ({selected_api_name})",
-                                selected_language,
-                                result.get("confidence", "N/A"),
-                                uploaded_audio.name
+                        with col1:
+                            file_data = save_transcript_to_file(transcript_text, "transcript", export_format)
+                            st.download_button(
+                                f"📥 Download .{export_format.upper()}",
+                                data=file_data,
+                                file_name=f"transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{export_format}",
+                                mime=f"text/{export_format}"
                             )
-                            
-                            # Download options
-                            col1a, col1b = st.columns(2)
-                            
-                            with col1a:
-                                file_data = save_transcript_to_file(transcript_text, "transcript", export_format)
-                                st.download_button(
-                                    f"📥 Download .{export_format.upper()}",
-                                    data=file_data,
-                                    file_name=f"transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{export_format}",
-                                    mime=f"text/{export_format}"
-                                )
-                            
-                            with col1b:
-                                st.write(f"📊 Words: {len(transcript_text.split())}")
-                            
-                            # Display timestamps for Whisper
-                            if "chunks" in result and result["chunks"]:
-                                st.subheader("🕑 Detailed Timestamps:")
-                                for chunk in result["chunks"]:
-                                    start = chunk.get('timestamp', [None, None])[0]
-                                    end = chunk.get('timestamp', [None, None])[1]
-                                    text = chunk.get('text', "")
-                                    
-                                    if start is not None and end is not None:
-                                        st.markdown(f"""
-                                        <div class="timestamp-box">
-                                            <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                                    else:
-                                        st.markdown(f"""
-                                        <div class="timestamp-box">
-                                            <strong>No timestamp</strong> → {text}
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                
-                except Exception as e:
-                    display_error_message(str(e), "transcription")
-                finally:
-                    # Clean up uploaded file
-                    if temp_file_path:
-                        safe_file_cleanup(temp_file_path)
-    
-    with col2:
-        if st.session_state.microphone_available and audio_recorder.is_available():
-            st.markdown("""
-            <div class="feature-box">
-                <h3>🎙️ Record Audio & Transcribe</h3>
-                <p>Record high-quality MP3 audio, listen to it, then transcribe</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Recording controls
-            col2a, col2b, col2c = st.columns(3)
-            
-            with col2a:
-                if not st.session_state.recording:
-                    if st.button("🔴 Start Recording", type="primary"):
-                        st.session_state.recording = True
-                        st.session_state.paused = False
-                        # Clear previous recording
-                        st.session_state.recorded_audio_file = None
-                        st.session_state.recorded_audio_data = None
-                        st.rerun()
-            
-            with col2b:
-                if st.session_state.recording:
-                    if not st.session_state.paused:
-                        if st.button("⏸️ Pause"):
-                            st.session_state.paused = True
-                            st.rerun()
-                    else:
-                        if st.button("▶️ Resume"):
-                            st.session_state.paused = False
-                            st.rerun()
-            
-            with col2c:
-                if st.session_state.recording:
-                    if st.button("⏹️ Stop Recording"):
-                        st.session_state.recording = False
-                        st.session_state.paused = False
-                        st.rerun()
-            
-            # Recording status indicators
-            if st.session_state.recording:
-                if st.session_state.paused:
-                    st.markdown("""
-                    <div class="paused-indicator">
-                        <h4>⏸️ RECORDING PAUSED</h4>
-                        <p>Click Resume to continue recording</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown("""
-                    <div class="recording-indicator">
-                        <h4>🔴 RECORDING IN PROGRESS</h4>
-                        <p>Speak clearly into your microphone...</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            # Handle recording
-            if st.session_state.recording and not st.session_state.paused:
-                try:
-                    audio_data = audio_recorder.record_audio(recording_duration)
-                    st.session_state.recording = False
-                    
-                    if audio_data is not None:
-                        # Save as MP3 file
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        mp3_filename = f"recording_{timestamp}.mp3"
                         
-                        # Create temporary file for MP3
-                        temp_mp3_path = os.path.join(tempfile.gettempdir(), mp3_filename)
+                        with col2:
+                            st.write(f"📊 Words: {len(transcript_text.split())}")
                         
-                        try:
-                            # Create MP3 bytes
-                            mp3_bytes = audio_recorder.save_as_mp3_bytes(audio_data)
-                            
-                            # Save to temporary file
-                            with open(temp_mp3_path, 'wb') as f:
-                                f.write(mp3_bytes)
-                            
-                            # Store the file path and data in session state
-                            st.session_state.recorded_audio_file = temp_mp3_path
-                            st.session_state.recorded_audio_data = audio_data
-                            st.session_state.recorded_audio_bytes = mp3_bytes
-                            
-                            display_success_message("Recording completed and saved as MP3!")
-                            st.rerun()
-                        except Exception as e:
-                            display_error_message(f"Failed to save recording as MP3: {str(e)}", "audio")
-                
-                except Exception as e:
-                    display_error_message(str(e), "recording")
-                    st.session_state.recording = False
-                    st.session_state.paused = False
-            
-            # Display recorded audio if available
-            if st.session_state.recorded_audio_file and os.path.exists(st.session_state.recorded_audio_file):
-                st.markdown("""
-                <div class="recorded-audio-box">
-                    <h4>🎵 Recorded Audio</h4>
-                    <p>Listen to your recording and then transcribe it</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Display audio player
-                with open(st.session_state.recorded_audio_file, 'rb') as audio_file:
-                    audio_bytes = audio_file.read()
-                    st.audio(audio_bytes, format='audio/mp3')
-                
-                # Show file info
-                file_size = os.path.getsize(st.session_state.recorded_audio_file) / (1024 * 1024)
-                st.write(f"📊 Recording: {os.path.basename(st.session_state.recorded_audio_file)} ({file_size:.2f} MB)")
-                
-                # Transcription controls
-                col2d, col2e = st.columns(2)
-                
-                with col2d:
-                    if st.button("🚀 Transcribe Recording", type="primary"):
-                        try:
-                            with st.spinner(f"Transcribing with {selected_api_name}..."):
-                                result = sr_manager.transcribe_audio_file(
-                                    st.session_state.recorded_audio_file, 
-                                    api_name, 
-                                    language_code, 
-                                    asr_pipeline
-                                )
+                        # Display timestamps for Whisper
+                        if "chunks" in result and result["chunks"]:
+                            st.subheader("🕑 Detailed Timestamps:")
+                            for chunk in result["chunks"]:
+                                start = chunk.get('timestamp', [None, None])[0]
+                                end = chunk.get('timestamp', [None, None])[1]
+                                text = chunk.get('text', "")
                                 
-                                display_success_message(f"Recording transcription completed using {result.get('method', api_name)}!")
-                                
-                                transcript_text = result["text"]
-                                
-                                if not transcript_text or transcript_text.strip() == "":
-                                    st.warning("⚠️ No speech detected in the recording")
+                                if start is not None and end is not None:
+                                    st.markdown(f"""
+                                    <div class="timestamp-box">
+                                        <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
+                                    </div>
+                                    """, unsafe_allow_html=True)
                                 else:
-                                    st.text_area("Recording Transcript", transcript_text, height=150)
-                                    
-                                    # Show confidence if available
-                                    if "confidence" in result and result["confidence"] != "N/A":
-                                        st.write(f"🎯 Confidence: {result['confidence']:.2%}")
-                                    
-                                    # Save to history
-                                    save_transcription_history(
-                                        transcript_text,
-                                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        f"Live Recording ({selected_api_name})",
-                                        selected_language,
-                                        result.get("confidence", "N/A"),
-                                        os.path.basename(st.session_state.recorded_audio_file)
-                                    )
-                                    
-                                    # Download options
-                                    col2f, col2g = st.columns(2)
-                                    
-                                    with col2f:
-                                        file_data = save_transcript_to_file(transcript_text, "recording_transcript", export_format)
-                                        st.download_button(
-                                            f"📥 Transcript .{export_format.upper()}",
-                                            data=file_data,
-                                            file_name=f"recording_transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{export_format}",
-                                            mime=f"text/{export_format}"
-                                        )
-                                    
-                                    with col2g:
-                                        # Download the MP3 recording
-                                        st.download_button(
-                                            "📥 Download MP3",
-                                            data=audio_bytes,
-                                            file_name=f"recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3",
-                                            mime="audio/mp3"
-                                        )
-                                    
-                                    # Display timestamps for Whisper
-                                    if "chunks" in result and result["chunks"]:
-                                        st.subheader("🕑 Detailed Timestamps:")
-                                        for chunk in result["chunks"]:
-                                            start = chunk.get('timestamp', [None, None])[0]
-                                            end = chunk.get('timestamp', [None, None])[1]
-                                            text = chunk.get('text', "")
-                                            
-                                            if start is not None and end is not None:
-                                                st.markdown(f"""
-                                                <div class="timestamp-box">
-                                                    <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
-                                                </div>
-                                                """, unsafe_allow_html=True)
-                        
-                        except Exception as e:
-                            display_error_message(str(e), "transcription")
-                
-                with col2e:
-                    if st.button("🗑️ Delete Recording"):
-                        # Clean up the recorded file
-                        if st.session_state.recorded_audio_file:
-                            safe_file_cleanup(st.session_state.recorded_audio_file)
-                        st.session_state.recorded_audio_file = None
-                        st.session_state.recorded_audio_data = None
-                        st.session_state.recorded_audio_bytes = None
-                        st.session_state.recorded_audio_filename = None
-                        st.rerun()
-        
-        else:
-            # Show alternative when recording is not available
-            st.markdown("""
-            <div class="feature-box">
-                <h3>🎙️ Live Recording Not Available</h3>
-                <p>Use file upload instead - works great with phone recordings!</p>
-            </div>
-            """, unsafe_allow_html=True)
+                                    st.markdown(f"""
+                                    <div class="timestamp-box">
+                                        <strong>No timestamp</strong> → {text}
+                                    </div>
+                                    """, unsafe_allow_html=True)
             
-            display_info_message("""
-            **Recording Tips:**
-            • Record audio on your phone or computer
-            • Save as MP3, WAV, or M4A format
-            • Upload the file using the left panel
-            • Works just as well as live recording!
-            """)
+            except Exception as e:
+                display_error_message(str(e), "transcription")
+            finally:
+                # Clean up uploaded file
+                if temp_file_path:
+                    safe_file_cleanup(temp_file_path)
     
     # Recent transcriptions
     if st.session_state.transcription_history:
@@ -1222,7 +634,7 @@ def main():
         recent_transcriptions = st.session_state.transcription_history[-5:]
         
         for i, item in enumerate(reversed(recent_transcriptions)):
-            file_info = f" | 📁 {item.get('file_name', 'Live')}" if item.get('file_name') else ""
+            file_info = f" | 📁 {item.get('file_name', 'Unknown')}" if item.get('file_name') else ""
             with st.expander(f"🎯 {item['method']} - {item['timestamp']} ({item.get('language', 'Unknown')}){file_info}"):
                 st.write(f"**Confidence:** {item.get('confidence', 'N/A')}")
                 st.write(f"**Words:** {len(item['text'].split())}")
@@ -1243,10 +655,9 @@ def main():
     st.markdown("""
     <div style="text-align: center; color: #666; padding: 2rem;">
         <h4>💡 Tips for Better Recognition</h4>
-        <p>🎧 Use headphones to avoid feedback | 🔇 Record in a quiet environment | 🗣️ Speak clearly and at normal pace</p>
-        <p>🌐 Different APIs work better for different languages | 📱 Phone recordings work great too!</p>
-        <p>🎵 High-quality audio for better transcription accuracy | 🎙️ Test microphone before important recordings</p>
-        <p><strong>🔧 Troubleshooting:</strong> If recording is silent, check microphone permissions in your browser</p>
+        <p>🎧 Use clear audio recordings | 🔇 Avoid background noise | 🗣️ Ensure clear speech</p>
+        <p>🌐 Different APIs work better for different languages | 📱 Works with mobile uploads</p>
+        <p>🎵 High-quality audio files for better transcription accuracy</p>
     </div>
     """, unsafe_allow_html=True)
 
