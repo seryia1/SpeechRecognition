@@ -6,6 +6,6 @@ numpy
 pandas
 soundfile
 pydub
-pyaudio
+
 torch
 torchaudio
