@@ -935,12 +935,6 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
-            display_info_message("""
-            **To enable browser-based recording:**
-            
-            1. Install the package:
-            ```bash
-            pip install audio-recorder-streamlit
             
             except Exception as e:
                 display_error_message(str(e), "transcription")
