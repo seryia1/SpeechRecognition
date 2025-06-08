@@ -1,6 +1,5 @@
 import streamlit as st
 import speech_recognition as sr
-from transformers import pipeline
 import librosa
 import numpy as np
 import tempfile
@@ -12,7 +11,21 @@ from pathlib import Path
 import soundfile as sf
 from pydub import AudioSegment
 import gc
-from audio_recorder_streamlit import audio_recorder
+
+# Try to import optional dependencies
+try:
+    from transformers import pipeline
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    st.warning("⚠️ Transformers library not available. Whisper functionality will be disabled.")
+
+try:
+    from audio_recorder_streamlit import audio_recorder
+    AUDIO_RECORDER_AVAILABLE = True
+except ImportError:
+    AUDIO_RECORDER_AVAILABLE = False
+    st.error("❌ audio-recorder-streamlit not installed. Live recording disabled.")
 
 # Configure page
 st.set_page_config(
@@ -104,6 +117,23 @@ st.markdown("""
         margin: 1rem 0;
         text-align: center;
     }
+    .dependency-warning {
+        background: #fff3cd;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 4px solid #ffc107;
+        margin: 1rem 0;
+    }
+    .github-info {
+        background: #e8f5e8;
+        color: #2e7d32;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 4px solid #4caf50;
+        margin: 1rem 0;
+        text-align: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -141,13 +171,19 @@ LANGUAGE_OPTIONS = {
 # Speech Recognition API options
 API_OPTIONS = {
     "Google Speech Recognition": "google",
-    "OpenAI Whisper (Local)": "whisper",
     "Sphinx (Offline)": "sphinx"
 }
+
+if TRANSFORMERS_AVAILABLE:
+    API_OPTIONS["OpenAI Whisper (Local)"] = "whisper"
 
 @st.cache_resource
 def load_asr_model(model_name):
     """Load and cache the ASR model"""
+    if not TRANSFORMERS_AVAILABLE:
+        st.error("Transformers library not available for Whisper models")
+        return None
+    
     try:
         return pipeline("automatic-speech-recognition", model=model_name)
     except Exception as e:
@@ -493,6 +529,14 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
+    # GitHub deployment info
+    st.markdown("""
+    <div class="github-info">
+        <strong>🚀 GitHub Deployment Ready</strong><br>
+        This app is configured for GitHub deployment with audio-recorder-streamlit for live recording.
+    </div>
+    """, unsafe_allow_html=True)
+    
     # Initialize components
     sr_manager = SpeechRecognitionManager()
     
@@ -612,111 +656,121 @@ def main():
         st.info("📁 **Upload:** MP3, WAV, FLAC, M4A, OGG, AIFF\n🎙️ **Record:** Live audio recording\n🔄 **Auto-converts** to compatible format")
     
     # Main content area - Live Recording Section
-    st.markdown("""
-    <div class="recording-box">
-        <h3>🎙️ Live Audio Recording</h3>
-        <p>Click the microphone button below to start recording. Speak clearly and avoid background noise for best results.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Audio recorder component
-    audio_bytes = audio_recorder(
-        text="Click to record",
-        recording_color="#e74c3c",
-        neutral_color="#34495e",
-        icon_name="microphone",
-        icon_size="2x",
-        pause_threshold=2.0,
-        sample_rate=16000
-    )
-    
-    # Handle recorded audio
-    if audio_bytes is not None:
-        # Check if this is a new recording
-        if st.session_state.last_recording != audio_bytes:
-            st.session_state.last_recording = audio_bytes
-            
-            # Display audio player for the recording
-            st.audio(audio_bytes, format="audio/wav")
-            
-            # Show recording info
-            audio_duration = len(audio_bytes) / (16000 * 2)  # Approximate duration
-            st.write(f"🎵 Recording captured ({audio_duration:.1f} seconds)")
-            
-            display_recording_status("Recording captured! Click 'Transcribe Recording' to process.")
-            
-            if st.button("🚀 Transcribe Recording", type="primary", key="transcribe_recording"):
-                try:
-                    with st.spinner(f"Processing and transcribing recording with {selected_api_name}..."):
-                        # Transcribe the recorded audio using the same function as file uploads
-                        result = sr_manager.transcribe_recorded_audio(
-                            audio_bytes, api_name, language_code, asr_pipeline
-                        )
-                        
-                        # Display results
-                        display_success_message(f"Live recording transcription completed using {result.get('method', api_name)}!")
-                        
-                        st.subheader("📝 Transcription Result:")
-                        transcript_text = result["text"]
-                        
-                        if not transcript_text or transcript_text.strip() == "":
-                            st.warning("⚠️ No speech detected in the recording")
-                        else:
-                            st.text_area("Transcript", transcript_text, height=150, key="recording_transcript")
-                            
-                            # Show confidence if available
-                            if "confidence" in result and result["confidence"] != "N/A":
-                                st.write(f"🎯 Confidence: {result['confidence']:.2%}")
-                            
-                            # Save to history
-                            save_transcription_history(
-                                transcript_text,
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                f"Live Recording ({selected_api_name})",
-                                selected_language,
-                                result.get("confidence", "N/A"),
-                                "Live Recording"
+    if AUDIO_RECORDER_AVAILABLE:
+        st.markdown("""
+        <div class="recording-box">
+            <h3>🎙️ Live Audio Recording</h3>
+            <p>Click the microphone button below to start recording. Speak clearly and avoid background noise for best results.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Audio recorder component
+        audio_bytes = audio_recorder(
+            text="Click to record",
+            recording_color="#e74c3c",
+            neutral_color="#34495e",
+            icon_name="microphone",
+            icon_size="2x",
+            pause_threshold=2.0,
+            sample_rate=16000
+        )
+        
+        # Handle recorded audio
+        if audio_bytes is not None:
+            # Check if this is a new recording
+            if st.session_state.last_recording != audio_bytes:
+                st.session_state.last_recording = audio_bytes
+                
+                # Display audio player for the recording
+                st.audio(audio_bytes, format="audio/wav")
+                
+                # Show recording info
+                audio_duration = len(audio_bytes) / (16000 * 2)  # Approximate duration
+                st.write(f"🎵 Recording captured ({audio_duration:.1f} seconds)")
+                
+                display_recording_status("Recording captured! Click 'Transcribe Recording' to process.")
+                
+                if st.button("🚀 Transcribe Recording", type="primary", key="transcribe_recording"):
+                    try:
+                        with st.spinner(f"Processing and transcribing recording with {selected_api_name}..."):
+                            # Transcribe the recorded audio using the same function as file uploads
+                            result = sr_manager.transcribe_recorded_audio(
+                                audio_bytes, api_name, language_code, asr_pipeline
                             )
                             
-                            # Download options
-                            col1, col2 = st.columns(2)
+                            # Display results
+                            display_success_message(f"Live recording transcription completed using {result.get('method', api_name)}!")
                             
-                            with col1:
-                                file_data = save_transcript_to_file(transcript_text, "recording_transcript", export_format)
-                                st.download_button(
-                                    f"📥 Download .{export_format.upper()}",
-                                    data=file_data,
-                                    file_name=f"recording_transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{export_format}",
-                                    mime=f"text/{export_format}",
-                                    key="download_recording"
+                            st.subheader("📝 Transcription Result:")
+                            transcript_text = result["text"]
+                            
+                            if not transcript_text or transcript_text.strip() == "":
+                                st.warning("⚠️ No speech detected in the recording")
+                            else:
+                                st.text_area("Transcript", transcript_text, height=150, key="recording_transcript")
+                                
+                                # Show confidence if available
+                                if "confidence" in result and result["confidence"] != "N/A":
+                                    st.write(f"🎯 Confidence: {result['confidence']:.2%}")
+                                
+                                # Save to history
+                                save_transcription_history(
+                                    transcript_text,
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    f"Live Recording ({selected_api_name})",
+                                    selected_language,
+                                    result.get("confidence", "N/A"),
+                                    "Live Recording"
                                 )
-                            
-                            with col2:
-                                st.write(f"📊 Words: {len(transcript_text.split())}")
-                            
-                            # Display timestamps for Whisper
-                            if "chunks" in result and result["chunks"]:
-                                st.subheader("🕑 Detailed Timestamps:")
-                                for chunk in result["chunks"]:
-                                    start = chunk.get('timestamp', [None, None])[0]
-                                    end = chunk.get('timestamp', [None, None])[1]
-                                    text = chunk.get('text', "")
-                                    
-                                    if start is not None and end is not None:
-                                        st.markdown(f"""
-                                        <div class="timestamp-box">
-                                            <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                                    else:
-                                        st.markdown(f"""
-                                        <div class="timestamp-box">
-                                            <strong>No timestamp</strong> → {text}
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                
-                except Exception as e:
-                    display_error_message(str(e), "recording")
+                                
+                                # Download options
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    file_data = save_transcript_to_file(transcript_text, "recording_transcript", export_format)
+                                    st.download_button(
+                                        f"📥 Download .{export_format.upper()}",
+                                        data=file_data,
+                                        file_name=f"recording_transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{export_format}",
+                                        mime=f"text/{export_format}",
+                                        key="download_recording"
+                                    )
+                                
+                                with col2:
+                                    st.write(f"📊 Words: {len(transcript_text.split())}")
+                                
+                                # Display timestamps for Whisper
+                                if "chunks" in result and result["chunks"]:
+                                    st.subheader("🕑 Detailed Timestamps:")
+                                    for chunk in result["chunks"]:
+                                        start = chunk.get('timestamp', [None, None])[0]
+                                        end = chunk.get('timestamp', [None, None])[1]
+                                        text = chunk.get('text', "")
+                                        
+                                        if start is not None and end is not None:
+                                            st.markdown(f"""
+                                            <div class="timestamp-box">
+                                                <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
+                                            </div>
+                                            """, unsafe_allow_html=True)
+                                        else:
+                                            st.markdown(f"""
+                                            <div class="timestamp-box">
+                                                <strong>No timestamp</strong> → {text}
+                                            </div>
+                                            """, unsafe_allow_html=True)
+                    
+                    except Exception as e:
+                        display_error_message(str(e), "recording")
+        
+    else:
+        st.markdown("""
+        <div class="dependency-warning">
+            <h3>🎙️ Live Recording Unavailable</h3>
+            <p><strong>Missing Dependency:</strong> audio-recorder-streamlit package is not installed.</p>
+            <p>Make sure your requirements.txt includes <code>audio-recorder-streamlit</code></p>
+        </div>
+        """, unsafe_allow_html=True)
     
     st.divider()
     
