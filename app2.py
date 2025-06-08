@@ -1,27 +1,13 @@
 import streamlit as st
 import speech_recognition as sr
-import librosa
-import numpy as np
 import tempfile
 import os
 from datetime import datetime
 import json
 import pandas as pd
-from pathlib import Path
-import soundfile as sf
-from pydub import AudioSegment
 import gc
-import io
-import wave
 
-# Try to import optional dependencies
-try:
-    from transformers import pipeline
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    st.warning("⚠️ Transformers library not available. Whisper functionality will be disabled.")
-
+# Only import audio recorder - avoid all other problematic dependencies
 try:
     from audio_recorder_streamlit import audio_recorder
     AUDIO_RECORDER_AVAILABLE = True
@@ -78,13 +64,6 @@ st.markdown("""
         background: #f8d7da;
         color: #721c24;
         border: 1px solid #f5c6cb;
-    }
-    .timestamp-box {
-        background: #e3f2fd;
-        padding: 0.5rem;
-        border-radius: 5px;
-        margin: 0.2rem 0;
-        border-left: 3px solid #2196f3;
     }
     .error-message {
         background: #ffebee;
@@ -145,8 +124,6 @@ def initialize_session_state():
         st.session_state.transcription_history = []
     if 'last_recording' not in st.session_state:
         st.session_state.last_recording = None
-    if 'recorded_file_path' not in st.session_state:
-        st.session_state.recorded_file_path = None
 
 # Language options for speech recognition
 LANGUAGE_OPTIONS = {
@@ -172,213 +149,83 @@ LANGUAGE_OPTIONS = {
     "Polish (Poland)": "pl-PL"
 }
 
-# Speech Recognition API options
+# Speech Recognition API options (only Google and Sphinx to avoid dependencies)
 API_OPTIONS = {
     "Google Speech Recognition": "google",
     "Sphinx (Offline)": "sphinx"
 }
 
-if TRANSFORMERS_AVAILABLE:
-    API_OPTIONS["OpenAI Whisper (Local)"] = "whisper"
-
-@st.cache_resource
-def load_asr_model(model_name):
-    """Load and cache the ASR model"""
-    if not TRANSFORMERS_AVAILABLE:
-        st.error("Transformers library not available for Whisper models")
-        return None
-    
+def safe_file_cleanup(file_path):
+    """Safely delete a file"""
     try:
-        return pipeline("automatic-speech-recognition", model=model_name)
+        if os.path.exists(file_path):
+            os.unlink(file_path)
+            return True
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None
+        st.warning(f"Could not delete temporary file: {str(e)}")
+        return False
 
-class AudioProcessor:
-    """Handle audio file conversion and preprocessing"""
-    
-    @staticmethod
-    def convert_to_wav(input_file, output_file, target_sr=16000):
-        """Convert any audio format to PCM WAV format"""
-        try:
-            # Method 1: Try with librosa (most reliable)
-            try:
-                audio, sr = librosa.load(input_file, sr=target_sr, mono=True)
-                sf.write(output_file, audio, target_sr, format='WAV', subtype='PCM_16')
-                return True, "Converted using librosa"
-            except Exception as e1:
-                # Method 2: Try with pydub
-                try:
-                    audio = AudioSegment.from_file(input_file)
-                    audio = audio.set_channels(1).set_frame_rate(target_sr)
-                    audio.export(output_file, format="wav")
-                    return True, "Converted using pydub"
-                except Exception as e2:
-                    # Method 3: Try with soundfile directly
-                    try:
-                        data, sr = sf.read(input_file)
-                        if len(data.shape) > 1:
-                            data = np.mean(data, axis=1)
-                        if sr != target_sr:
-                            data = librosa.resample(data, orig_sr=sr, target_sr=target_sr)
-                        sf.write(output_file, data, target_sr, format='WAV', subtype='PCM_16')
-                        return True, "Converted using soundfile"
-                    except Exception as e3:
-                        return False, f"All conversion methods failed: librosa({str(e1)}), pydub({str(e2)}), soundfile({str(e3)})"
-        except Exception as e:
-            return False, f"Audio conversion error: {str(e)}"
-    
-    @staticmethod
-    def save_audio_bytes_to_wav(audio_bytes, output_file):
-        """Save audio bytes directly to WAV file"""
-        try:
-            with open(output_file, 'wb') as f:
-                f.write(audio_bytes)
-            return True, f"Saved audio bytes to {output_file}"
-        except Exception as e:
-            return False, f"Failed to save audio bytes: {str(e)}"
-
-def safe_file_cleanup(file_path, max_retries=3, delay=0.1):
-    """Safely delete a file with retries"""
-    import time
-    for attempt in range(max_retries):
-        try:
-            if os.path.exists(file_path):
-                gc.collect()
-                time.sleep(delay)
-                os.unlink(file_path)
-                return True
-        except (OSError, PermissionError) as e:
-            if attempt < max_retries - 1:
-                time.sleep(delay * (attempt + 1))
-                continue
-            else:
-                st.warning(f"Could not delete temporary file: {str(e)}")
-                return False
-    return True
-
-class SpeechRecognitionManager:
+class CleanSpeechRecognizer:
     def __init__(self):
         self.recognizer = sr.Recognizer()
-        self.audio_processor = AudioProcessor()
-        
-    def transcribe_audio_whisper(self, audio_file, model_pipeline):
-        """Transcribe audio file using Whisper"""
-        try:
-            # Load audio as numpy array (forces mono, resample to 16kHz)
-            audio, sr = librosa.load(audio_file, sr=16000)
-            
-            # Check if audio is too short
-            if len(audio) < 1600:  # Less than 0.1 seconds
-                raise Exception("Audio file is too short (less than 0.1 seconds)")
-            
-            # Check if audio is silent
-            if np.max(np.abs(audio)) < 0.001:
-                raise Exception("Audio appears to be silent or very quiet")
-            
-            # Run the ASR pipeline with timestamps
-            result = model_pipeline(audio, return_timestamps=True)
-            
-            return {
-                "text": result["text"].strip(),
-                "confidence": 1.0,
-                "chunks": result.get("chunks", []),
-                "method": "whisper"
-            }
-        except Exception as e:
-            raise Exception(f"Whisper transcription error: {str(e)}")
+        # Optimize settings for better recognition
+        self.recognizer.energy_threshold = 300
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.pause_threshold = 0.8
+        self.recognizer.phrase_threshold = 0.3
+        self.recognizer.non_speaking_duration = 0.8
     
-    def transcribe_audio_file(self, audio_file, api_name, language="en-US", model_pipeline=None):
-        """Transcribe audio file using selected API with proper format conversion"""
-        temp_wav_path = None
+    def transcribe_audio_file(self, audio_file_path, api_name, language="en-US"):
+        """Transcribe audio file using speech_recognition library only"""
         try:
-            if api_name == "whisper":
-                if not model_pipeline:
-                    raise Exception("Whisper model not loaded")
-                return self.transcribe_audio_whisper(audio_file, model_pipeline)
-            else:
-                # For other APIs, convert to proper format first
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_wav:
-                    temp_wav_path = temp_wav.name
-                
-                conversion_success, conversion_msg = self.audio_processor.convert_to_wav(
-                    audio_file, temp_wav_path
-                )
-                
-                if not conversion_success:
-                    raise Exception(f"Audio conversion failed: {conversion_msg}")
-                
-                try:
-                    result = self._transcribe_with_speech_recognition(temp_wav_path, api_name, language)
-                    return result
-                finally:
-                    # Safe cleanup
-                    if temp_wav_path:
-                        safe_file_cleanup(temp_wav_path)
-                        
-        except Exception as e:
-            # Ensure cleanup even on error
-            if temp_wav_path:
-                safe_file_cleanup(temp_wav_path)
-            raise Exception(f"Transcription failed: {str(e)}")
-    
-    def transcribe_recorded_audio_direct(self, audio_bytes, api_name, language="en-US", model_pipeline=None):
-        """Direct approach to transcribe recorded audio bytes"""
-        temp_wav_path = None
-        try:
-            # Create a temporary WAV file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_wav:
-                temp_wav_path = temp_wav.name
+            # Verify file exists
+            if not os.path.exists(audio_file_path):
+                raise Exception("Audio file does not exist")
             
-            # Save audio bytes directly to file
-            with open(temp_wav_path, 'wb') as f:
-                f.write(audio_bytes)
+            file_size = os.path.getsize(audio_file_path)
+            if file_size == 0:
+                raise Exception("Audio file is empty")
             
-            # Check if file was created successfully
-            if not os.path.exists(temp_wav_path) or os.path.getsize(temp_wav_path) == 0:
-                raise Exception("Failed to save recorded audio")
+            st.write(f"🔍 Processing audio file ({file_size} bytes)")
             
-            # For debugging
-            st.write(f"Debug: Saved audio file size: {os.path.getsize(temp_wav_path)} bytes")
-            
-            # Use the appropriate transcription method
-            if api_name == "whisper":
-                if not model_pipeline:
-                    raise Exception("Whisper model not loaded")
-                result = self.transcribe_audio_whisper(temp_wav_path, model_pipeline)
-            else:
-                # For Google and Sphinx, use speech_recognition
-                result = self._transcribe_with_speech_recognition(temp_wav_path, api_name, language)
-            
-            return result
-            
-        except Exception as e:
-            raise Exception(f"Recorded audio transcription failed: {str(e)}")
-        finally:
-            # Clean up temporary file
-            if temp_wav_path and os.path.exists(temp_wav_path):
-                safe_file_cleanup(temp_wav_path)
-    
-    def _transcribe_with_speech_recognition(self, audio_file, api_name, language):
-        """Transcribe using speech_recognition library APIs"""
-        try:
-            with sr.AudioFile(audio_file) as source:
+            # Load audio file
+            with sr.AudioFile(audio_file_path) as source:
+                # Adjust for ambient noise
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                audio = self.recognizer.record(source)
+                # Record the audio data
+                audio_data = self.recognizer.record(source)
             
-            if not hasattr(audio, 'frame_data') or len(audio.frame_data) == 0:
+            # Verify we have audio data
+            if not hasattr(audio_data, 'frame_data') or len(audio_data.frame_data) == 0:
                 raise Exception("No audio data found in file")
             
-            kwargs = {"language": language}
+            st.write(f"✅ Audio loaded successfully ({len(audio_data.frame_data)} bytes of audio data)")
             
+            # Transcribe using selected API
+            text = ""
             if api_name == "google":
-                text = self.recognizer.recognize_google(audio, **kwargs)
+                try:
+                    text = self.recognizer.recognize_google(audio_data, language=language)
+                    st.write("✅ Google Speech Recognition completed")
+                except sr.UnknownValueError:
+                    raise Exception("Google Speech Recognition could not understand the audio")
+                except sr.RequestError as e:
+                    raise Exception(f"Google Speech Recognition service error: {str(e)}")
+            
             elif api_name == "sphinx":
-                lang_code = language.split('-')[0]
-                text = self.recognizer.recognize_sphinx(audio, language=lang_code)
+                try:
+                    lang_code = language.split('-')[0]  # Convert en-US to en
+                    text = self.recognizer.recognize_sphinx(audio_data, language=lang_code)
+                    st.write("✅ Sphinx recognition completed")
+                except sr.UnknownValueError:
+                    raise Exception("Sphinx could not understand the audio")
+                except sr.RequestError as e:
+                    raise Exception(f"Sphinx error: {str(e)}")
+            
             else:
                 raise Exception(f"Unsupported API: {api_name}")
             
+            # Check if we got text
             if not text or text.strip() == "":
                 raise Exception("No speech detected in audio")
             
@@ -389,17 +236,30 @@ class SpeechRecognitionManager:
                 "method": api_name
             }
             
-        except sr.UnknownValueError:
-            raise Exception("Could not understand audio - speech was unclear, too quiet, or silent")
-        except sr.RequestError as e:
-            if "quota" in str(e).lower():
-                raise Exception(f"API quota exceeded: {str(e)}")
-            elif "network" in str(e).lower() or "connection" in str(e).lower():
-                raise Exception(f"Network connection error: {str(e)}")
-            else:
-                raise Exception(f"API request failed: {str(e)}")
         except Exception as e:
-            raise Exception(f"Speech recognition error: {str(e)}")
+            raise Exception(f"Transcription failed: {str(e)}")
+    
+    def transcribe_recorded_audio(self, audio_bytes, api_name, language="en-US"):
+        """Transcribe recorded audio bytes"""
+        temp_file_path = None
+        try:
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+                temp_file_path = temp_file.name
+                temp_file.write(audio_bytes)
+            
+            st.write(f"💾 Saved recording to temporary file ({len(audio_bytes)} bytes)")
+            
+            # Use the same transcription method as file uploads
+            result = self.transcribe_audio_file(temp_file_path, api_name, language)
+            return result
+            
+        except Exception as e:
+            raise Exception(f"Recording transcription failed: {str(e)}")
+        finally:
+            # Clean up
+            if temp_file_path:
+                safe_file_cleanup(temp_file_path)
 
 def save_transcript_to_file(text, filename, file_format):
     """Save transcript to different file formats"""
@@ -498,15 +358,6 @@ def display_success_message(message):
     </div>
     """, unsafe_allow_html=True)
 
-def display_info_message(message):
-    """Display formatted info messages"""
-    st.markdown(f"""
-    <div class="info-message">
-        <strong>ℹ️ Info:</strong><br>
-        {message}
-    </div>
-    """, unsafe_allow_html=True)
-
 def display_recording_status(message):
     """Display formatted recording status messages"""
     st.markdown(f"""
@@ -523,20 +374,20 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🎙️ Speech Recognition App</h1>
-        <p>Upload Audio Files or Record Live | High-Quality Transcription</p>
+        <p>Clean Version - No Dependency Conflicts</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # GitHub deployment info
+    # Clean version info
     st.markdown("""
     <div class="github-info">
-        <strong>🚀 GitHub Deployment Ready</strong><br>
-        This app is configured for GitHub deployment with audio-recorder-streamlit for live recording.
+        <strong>🧹 Ultra-Clean Version</strong><br>
+        This version uses only essential libraries to avoid all dependency conflicts.
     </div>
     """, unsafe_allow_html=True)
     
-    # Initialize components
-    sr_manager = SpeechRecognitionManager()
+    # Initialize speech recognizer
+    recognizer = CleanSpeechRecognizer()
     
     # Sidebar configuration
     with st.sidebar:
@@ -551,34 +402,6 @@ def main():
         )
         api_name = API_OPTIONS[selected_api_name]
         
-        # Whisper model selection and loading
-        asr_pipeline = None
-        if api_name == "whisper":
-            st.subheader("🤖 Whisper Model")
-            model_options = {
-                "Whisper Tiny (Fast)": "openai/whisper-tiny",
-                "Whisper Base (Balanced)": "openai/whisper-base",
-                "Whisper Small (Better Quality)": "openai/whisper-small"
-            }
-            
-            selected_model = st.selectbox(
-                "Choose Model",
-                options=list(model_options.keys()),
-                help="Larger models provide better accuracy but are slower"
-            )
-            
-            model_name = model_options[selected_model]
-            
-            # Load model
-            with st.spinner(f"Loading {selected_model}..."):
-                asr_pipeline = load_asr_model(model_name)
-            
-            if asr_pipeline:
-                st.success("✅ Model loaded successfully!")
-            else:
-                st.error("❌ Failed to load model")
-                return
-        
         # Language Selection
         st.subheader("🌍 Language Settings")
         selected_language = st.selectbox(
@@ -588,33 +411,10 @@ def main():
         )
         language_code = LANGUAGE_OPTIONS[selected_language]
         
-        # Recording Settings
-        st.subheader("🎙️ Recording Settings")
-        recording_duration = st.slider(
-            "Max Recording Duration (seconds)",
-            min_value=5,
-            max_value=300,
-            value=30,
-            help="Maximum duration for live recording"
-        )
-        
         # Test API Connection
         st.subheader("🔍 API Status")
         if st.button("Test API Connection"):
-            with st.spinner("Testing API connection..."):
-                if api_name == "whisper":
-                    is_working = asr_pipeline is not None
-                elif api_name == "google":
-                    is_working = True
-                elif api_name == "sphinx":
-                    is_working = True
-                else:
-                    is_working = False
-                
-                if is_working:
-                    st.markdown('<div class="api-status api-success">✅ API Ready</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown('<div class="api-status api-error">❌ API Not Available</div>', unsafe_allow_html=True)
+            st.markdown('<div class="api-status api-success">✅ API Ready</div>', unsafe_allow_html=True)
         
         st.divider()
         
@@ -648,17 +448,13 @@ def main():
                 st.rerun()
         else:
             st.write("No transcriptions yet")
-        
-        # Audio Format Info
-        st.subheader("📋 Supported Formats")
-        st.info("📁 **Upload:** MP3, WAV, FLAC, M4A, OGG, AIFF\n🎙️ **Record:** Live audio recording\n🔄 **Auto-converts** to compatible format")
     
     # Main content area - Live Recording Section
     if AUDIO_RECORDER_AVAILABLE:
         st.markdown("""
         <div class="recording-box">
             <h3>🎙️ Live Audio Recording</h3>
-            <p>Click the microphone button below to start recording. Speak clearly and avoid background noise for best results.</p>
+            <p>Ultra-clean version with minimal dependencies for maximum compatibility.</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -683,26 +479,20 @@ def main():
                 st.audio(audio_bytes, format="audio/wav")
                 
                 # Show recording info
-                audio_duration = len(audio_bytes) / (16000 * 2)  # Approximate duration
-                st.write(f"🎵 Recording captured ({audio_duration:.1f} seconds)")
+                st.write(f"🎵 Recording captured ({len(audio_bytes)} bytes)")
                 
                 display_recording_status("Recording captured! Click 'Transcribe Recording' to process.")
                 
-                # Save the audio bytes to a temporary file for later use
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
-                    tmp_file.write(audio_bytes)
-                    st.session_state.recorded_file_path = tmp_file.name
-                
                 if st.button("🚀 Transcribe Recording", type="primary", key="transcribe_recording"):
                     try:
-                        with st.spinner(f"Processing and transcribing recording with {selected_api_name}..."):
-                            # Use the direct transcription method
-                            result = sr_manager.transcribe_recorded_audio_direct(
-                                audio_bytes, api_name, language_code, asr_pipeline
+                        with st.spinner(f"Transcribing with {selected_api_name}..."):
+                            # Use the clean transcription method
+                            result = recognizer.transcribe_recorded_audio(
+                                audio_bytes, api_name, language_code
                             )
                             
                             # Display results
-                            display_success_message(f"Live recording transcription completed using {result.get('method', api_name)}!")
+                            display_success_message(f"Recording transcription completed using {result.get('method', api_name)}!")
                             
                             st.subheader("📝 Transcription Result:")
                             transcript_text = result["text"]
@@ -712,7 +502,7 @@ def main():
                             else:
                                 st.text_area("Transcript", transcript_text, height=150, key="recording_transcript")
                                 
-                                # Show confidence if available
+                                # Show confidence
                                 if "confidence" in result and result["confidence"] != "N/A":
                                     st.write(f"🎯 Confidence: {result['confidence']:.2%}")
                                 
@@ -741,27 +531,6 @@ def main():
                                 
                                 with col2:
                                     st.write(f"📊 Words: {len(transcript_text.split())}")
-                                
-                                # Display timestamps for Whisper
-                                if "chunks" in result and result["chunks"]:
-                                    st.subheader("🕑 Detailed Timestamps:")
-                                    for chunk in result["chunks"]:
-                                        start = chunk.get('timestamp', [None, None])[0]
-                                        end = chunk.get('timestamp', [None, None])[1]
-                                        text = chunk.get('text', "")
-                                        
-                                        if start is not None and end is not None:
-                                            st.markdown(f"""
-                                            <div class="timestamp-box">
-                                                <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
-                                            </div>
-                                            """, unsafe_allow_html=True)
-                                        else:
-                                            st.markdown(f"""
-                                            <div class="timestamp-box">
-                                                <strong>No timestamp</strong> → {text}
-                                            </div>
-                                            """, unsafe_allow_html=True)
                     
                     except Exception as e:
                         display_error_message(str(e), "recording")
@@ -771,7 +540,6 @@ def main():
         <div class="dependency-warning">
             <h3>🎙️ Live Recording Unavailable</h3>
             <p><strong>Missing Dependency:</strong> audio-recorder-streamlit package is not installed.</p>
-            <p>Make sure your requirements.txt includes <code>audio-recorder-streamlit</code></p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -781,15 +549,15 @@ def main():
     st.markdown("""
     <div class="feature-box">
         <h3>📁 Audio File Transcription</h3>
-        <p>Upload audio files in any format - automatic conversion included</p>
+        <p>Upload WAV files for transcription</p>
     </div>
     """, unsafe_allow_html=True)
     
     # File uploader
     uploaded_audio = st.file_uploader(
-        "Upload an audio file", 
-        type=["wav", "mp3", "m4a", "flac", "ogg", "aiff", "aif"],
-        help="All formats supported - automatic conversion to compatible format"
+        "Upload a WAV audio file", 
+        type=["wav"],
+        help="WAV format only for maximum compatibility"
     )
     
     if uploaded_audio is not None:
@@ -803,15 +571,15 @@ def main():
         if st.button("🚀 Transcribe Audio File", type="primary", key="transcribe_file"):
             temp_file_path = None
             try:
-                with st.spinner(f"Processing and transcribing with {selected_api_name}..."):
+                with st.spinner(f"Transcribing with {selected_api_name}..."):
                     # Save uploaded file temporarily
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_audio.name).suffix) as tmp_file:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
                         tmp_file.write(uploaded_audio.read())
                         temp_file_path = tmp_file.name
                     
                     # Transcribe
-                    result = sr_manager.transcribe_audio_file(
-                        temp_file_path, api_name, language_code, asr_pipeline
+                    result = recognizer.transcribe_audio_file(
+                        temp_file_path, api_name, language_code
                     )
                     
                     # Display results
@@ -825,7 +593,7 @@ def main():
                     else:
                         st.text_area("Transcript", transcript_text, height=150, key="file_transcript")
                         
-                        # Show confidence if available
+                        # Show confidence
                         if "confidence" in result and result["confidence"] != "N/A":
                             st.write(f"🎯 Confidence: {result['confidence']:.2%}")
                         
@@ -854,27 +622,6 @@ def main():
                         
                         with col2:
                             st.write(f"📊 Words: {len(transcript_text.split())}")
-                        
-                        # Display timestamps for Whisper
-                        if "chunks" in result and result["chunks"]:
-                            st.subheader("🕑 Detailed Timestamps:")
-                            for chunk in result["chunks"]:
-                                start = chunk.get('timestamp', [None, None])[0]
-                                end = chunk.get('timestamp', [None, None])[1]
-                                text = chunk.get('text', "")
-                                
-                                if start is not None and end is not None:
-                                    st.markdown(f"""
-                                    <div class="timestamp-box">
-                                        <strong>{start:.2f}s - {end:.2f}s</strong> → {text}
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                else:
-                                    st.markdown(f"""
-                                    <div class="timestamp-box">
-                                        <strong>No timestamp</strong> → {text}
-                                    </div>
-                                    """, unsafe_allow_html=True)
             
             except Exception as e:
                 display_error_message(str(e), "transcription")
@@ -908,19 +655,14 @@ def main():
                     key=f"download_{i}"
                 )
     
-    # Clean up any temporary files when the app is done
-    if st.session_state.recorded_file_path and os.path.exists(st.session_state.recorded_file_path):
-        safe_file_cleanup(st.session_state.recorded_file_path)
-    
     # Footer
     st.divider()
     st.markdown("""
     <div style="text-align: center; color: #666; padding: 2rem;">
         <h4>💡 Tips for Better Recognition</h4>
         <p>🎧 Use clear audio recordings | 🔇 Avoid background noise | 🗣️ Ensure clear speech</p>
-        <p>🌐 Different APIs work better for different languages | 📱 Works with mobile uploads</p>
-        <p>🎵 High-quality audio files for better transcription accuracy</p>
-        <p>🎙️ <strong>New:</strong> Live recording with high-quality audio capture</p>
+        <p>🌐 Different APIs work better for different languages</p>
+        <p>🧹 <strong>Clean Version:</strong> No dependency conflicts, maximum compatibility</p>
     </div>
     """, unsafe_allow_html=True)
 
