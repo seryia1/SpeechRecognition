@@ -8,3 +8,4 @@ soundfile
 pydub
 torch
 torchaudio
+audio-recorder-streamlit
