@@ -11,6 +11,8 @@ from pathlib import Path
 import soundfile as sf
 from pydub import AudioSegment
 import gc
+import io
+import wave
 
 # Try to import optional dependencies
 try:
@@ -143,6 +145,8 @@ def initialize_session_state():
         st.session_state.transcription_history = []
     if 'last_recording' not in st.session_state:
         st.session_state.last_recording = None
+    if 'recorded_file_path' not in st.session_state:
+        st.session_state.recorded_file_path = None
 
 # Language options for speech recognition
 LANGUAGE_OPTIONS = {
@@ -225,24 +229,14 @@ class AudioProcessor:
             return False, f"Audio conversion error: {str(e)}"
     
     @staticmethod
-    def process_recorded_audio(audio_bytes, output_file, target_sr=16000):
-        """Process recorded audio bytes and save as WAV"""
+    def save_audio_bytes_to_wav(audio_bytes, output_file):
+        """Save audio bytes directly to WAV file"""
         try:
-            # Save the recorded bytes to a temporary file first
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_input:
-                temp_input.write(audio_bytes)
-                temp_input_path = temp_input.name
-            
-            try:
-                # Convert using the existing conversion method
-                success, msg = AudioProcessor.convert_to_wav(temp_input_path, output_file, target_sr)
-                return success, msg
-            finally:
-                # Clean up temporary input file
-                safe_file_cleanup(temp_input_path)
-                
+            with open(output_file, 'wb') as f:
+                f.write(audio_bytes)
+            return True, f"Saved audio bytes to {output_file}"
         except Exception as e:
-            return False, f"Recorded audio processing error: {str(e)}"
+            return False, f"Failed to save audio bytes: {str(e)}"
 
 def safe_file_cleanup(file_path, max_retries=3, delay=0.1):
     """Safely delete a file with retries"""
@@ -328,28 +322,32 @@ class SpeechRecognitionManager:
                 safe_file_cleanup(temp_wav_path)
             raise Exception(f"Transcription failed: {str(e)}")
     
-    def transcribe_recorded_audio(self, audio_bytes, api_name, language="en-US", model_pipeline=None):
-        """Transcribe recorded audio bytes using the same workflow as file uploads"""
+    def transcribe_recorded_audio_direct(self, audio_bytes, api_name, language="en-US", model_pipeline=None):
+        """Direct approach to transcribe recorded audio bytes"""
         temp_wav_path = None
         try:
-            # Create temporary file for the processed audio
+            # Create a temporary WAV file
             with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_wav:
                 temp_wav_path = temp_wav.name
             
-            # Process the recorded audio bytes
-            conversion_success, conversion_msg = self.audio_processor.process_recorded_audio(
-                audio_bytes, temp_wav_path
-            )
+            # Save audio bytes directly to file
+            with open(temp_wav_path, 'wb') as f:
+                f.write(audio_bytes)
             
-            if not conversion_success:
-                raise Exception(f"Recorded audio processing failed: {conversion_msg}")
+            # Check if file was created successfully
+            if not os.path.exists(temp_wav_path) or os.path.getsize(temp_wav_path) == 0:
+                raise Exception("Failed to save recorded audio")
             
-            # Use the same transcription method as file uploads
+            # For debugging
+            st.write(f"Debug: Saved audio file size: {os.path.getsize(temp_wav_path)} bytes")
+            
+            # Use the appropriate transcription method
             if api_name == "whisper":
                 if not model_pipeline:
                     raise Exception("Whisper model not loaded")
                 result = self.transcribe_audio_whisper(temp_wav_path, model_pipeline)
             else:
+                # For Google and Sphinx, use speech_recognition
                 result = self._transcribe_with_speech_recognition(temp_wav_path, api_name, language)
             
             return result
@@ -358,7 +356,7 @@ class SpeechRecognitionManager:
             raise Exception(f"Recorded audio transcription failed: {str(e)}")
         finally:
             # Clean up temporary file
-            if temp_wav_path:
+            if temp_wav_path and os.path.exists(temp_wav_path):
                 safe_file_cleanup(temp_wav_path)
     
     def _transcribe_with_speech_recognition(self, audio_file, api_name, language):
@@ -690,11 +688,16 @@ def main():
                 
                 display_recording_status("Recording captured! Click 'Transcribe Recording' to process.")
                 
+                # Save the audio bytes to a temporary file for later use
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                    tmp_file.write(audio_bytes)
+                    st.session_state.recorded_file_path = tmp_file.name
+                
                 if st.button("🚀 Transcribe Recording", type="primary", key="transcribe_recording"):
                     try:
                         with st.spinner(f"Processing and transcribing recording with {selected_api_name}..."):
-                            # Transcribe the recorded audio using the same function as file uploads
-                            result = sr_manager.transcribe_recorded_audio(
+                            # Use the direct transcription method
+                            result = sr_manager.transcribe_recorded_audio_direct(
                                 audio_bytes, api_name, language_code, asr_pipeline
                             )
                             
@@ -904,6 +907,10 @@ def main():
                     mime=f"text/{export_format}",
                     key=f"download_{i}"
                 )
+    
+    # Clean up any temporary files when the app is done
+    if st.session_state.recorded_file_path and os.path.exists(st.session_state.recorded_file_path):
+        safe_file_cleanup(st.session_state.recorded_file_path)
     
     # Footer
     st.divider()
