@@ -1,12 +1,10 @@
 streamlit
-speech-recognition
+speechrecognition
+transformers
 librosa
+numpy
+pandas
 soundfile
 pydub
-pandas
-numpy
-scipy
-audio-recorder-streamlit
-transformers
 torch
-pyaudio
+torchaudio
